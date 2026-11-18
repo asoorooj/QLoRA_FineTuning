@@ -24,6 +24,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import time
 
+from vram_tracker import VRamTracker
+
 # Hyper Parameters
 model_name = "Qwen/Qwen2.5-3B-Instruct"
 L = 1024 # Sequence length
@@ -36,25 +38,6 @@ ni = 2e-4 # learning rate
 dataset_name = "project-numina/NuminaMath-CoT"
 benchmark_prompt = "What is the integral of x?"
 
-class VRamTracker:
-    def __init__(self):
-        self.vram_usage = {}
-
-    def resetVRamMemoryStat(self):
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-
-    def recordPeakVRam(self, label):
-        if not torch.cuda.is_available():
-            return 0.0
-
-        torch.cuda.synchronize()
-        peak_vram_gb = torch.cuda.max_memory_allocated() / (1024**3)
-        # print(f"{label}: {peak_vram_gb:.2f} GB / 15.00 GB")
-
-        self.vram_usage[label] = peak_vram_gb
-        self.resetVRamMemoryStat()
-        return peak_vram_gb
 
 def train_model(
         model,
@@ -603,7 +586,3 @@ def run_training_experiment(rank, alpha, output_directory):
 
     del model, merged_model, tokenizer, dataset, train_dataset, eval_dataset, vramTracker, tokenized_dataset, packed_dataset
     torch.cuda.empty_cache()
-
-run_training_experiment(4, 8, "./training_output/NuminaMath/r4a8")
-run_training_experiment(16, 32, "./training_output/NuminaMath/r16a32")
-run_training_experiment(64, 128, "./training_output/NuminaMath/r64a128")
