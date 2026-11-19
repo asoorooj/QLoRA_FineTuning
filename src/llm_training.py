@@ -6,7 +6,8 @@ from transformers import (
     AutoTokenizer,
     AutoConfig,
     BitsAndBytesConfig,
-    get_linear_schedule_with_warmup,
+    TrainingArguments,
+    Trainer,
     default_data_collator
 )
 import math
@@ -44,54 +45,121 @@ def train_model(
         train_dataset,
         eval_dataset,
         vram_tracker,
+        output_directory,
         epochs=1,
         logging_steps=50,
         eval_steps=50
 ):
+
+    # Map your original optimizer names to
+    # Hugging Face optimizer identifiers.
+
     OPTIMIZER_MAP = {
-        "adamw": torch.optim.AdamW,
-        "adamw_8bit": bnb.optim.AdamW8bit,
-        "paged_adamw_8bit": bnb.optim.PagedAdamW8bit,
-        "paged_adamw_32bit": bnb.optim.PagedAdamW32bit,
+        "adamw": "adamw_torch",
+        "adamw_8bit": "adamw_bnb_8bit",
+        "paged_adamw_8bit": "paged_adamw_8bit",
+        "paged_adamw_32bit": "paged_adamw_32bit",
     }
 
-    device = torch.device("cuda")
+    optimizer = OPTIMIZER_MAP[optimizer_name]
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=B,
-        shuffle=True,
-        collate_fn=default_data_collator
+    # --------------------------------------------------
+    # TRAINING ARGUMENTS
+    # --------------------------------------------------
+
+    training_args = TrainingArguments(
+
+        output_dir=f".{output_directory}/qlora_checkpoints",
+
+        # Training configuration
+        num_train_epochs=epochs,
+        per_device_train_batch_size=B,
+        per_device_eval_batch_size=B,
+        gradient_accumulation_steps=G,
+
+        # Optimizer configuration
+        optim=optimizer,
+        learning_rate=ni,
+        lr_scheduler_type="linear",
+        warmup_ratio=0.03,
+        weight_decay=0.0,
+        max_grad_norm=1.0,
+
+        # Mixed precision
+        fp16=True,
+        bf16=False,
+
+        # Logging
+        logging_strategy="steps",
+        logging_steps=logging_steps,
+        logging_first_step=True,
+
+        # Evaluation
+        eval_strategy="steps",
+        eval_steps=eval_steps,
+
+        # Checkpointing
+        save_strategy="no",
+
+        # Performance
+        dataloader_pin_memory=True,
+
+        # Metrics
+        include_tokens_per_second=True,
+
+        # Miscellaneous
+        report_to="none",
+        remove_unused_columns=False,
+
     )
 
-    eval_loader = DataLoader(
-        eval_dataset,
-        batch_size=B,
-        shuffle=False,
-        collate_fn=default_data_collator
+    # --------------------------------------------------
+    # CALLBACKS
+    # --------------------------------------------------
+
+    # callbacks = [
+    #     VRAMTrackingCallback(vram_tracker)
+    # ]
+
+    # --------------------------------------------------
+    # TRAINER
+    # --------------------------------------------------
+
+    trainer = Trainer(
+
+        model=model,
+
+        args=training_args,
+
+        train_dataset=train_dataset,
+
+        eval_dataset=eval_dataset,
+
+        data_collator=default_data_collator,
+
+        # callbacks=callbacks,
+
     )
 
-    trainable_params = [
-        p for p in model.parameters()
-        if p.requires_grad
-    ]
+    # --------------------------------------------------
+    # TRAINING
+    # --------------------------------------------------
 
-    optimizer = OPTIMIZER_MAP[optimizer_name](
-        trainable_params,
-        lr=ni
-    )
+    start_time = time.perf_counter()
 
-    steps_per_epoch = math.ceil(
-        len(train_loader) / G
-    )
+    train_result = trainer.train()
 
-    total_steps = steps_per_epoch * epochs
+    # --------------------------------------------------
+    # FINAL EVALUATION
+    # --------------------------------------------------
 
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=int(total_steps * 0.03),
-        num_training_steps=total_steps
-    )
+    final_eval = trainer.evaluate()
+
+    runtime = time.perf_counter() - start_time
+
+    # --------------------------------------------------
+    # HISTORY EXTRACTION
+    # --------------------------------------------------
 
     history = {
         "training_steps": [],
@@ -100,223 +168,55 @@ def train_model(
         "validation_losses": []
     }
 
-    global_step = 0
-    accumulated_loss = 0.0
-    accumulated_batches = 0
+    for entry in trainer.state.log_history:
 
-    total_tokens = 0
-    start_time = time.perf_counter()
+        if "loss" in entry:
 
-    optimizer.zero_grad(set_to_none=True)
-
-    for epoch in range(epochs):
-
-        model.train()
-
-        for batch_idx, batch in enumerate(train_loader):
-            print(
-                f"Training... Epoch {epoch + 1}/{epochs} | "
-                f"Batch {batch_idx + 1}/{len(train_loader)}",
-                flush=True
-            )
-            batch = {
-                key: value.to(device)
-                for key, value in batch.items()
-            }
-
-            # Determine the size of this accumulation group.
-            group_start = (
-                                  batch_idx // G
-                          ) * G
-
-            group_size = min(
-                G,
-                len(train_loader) - group_start
+            history["training_steps"].append(
+                entry["step"]
             )
 
-            total_tokens += batch["attention_mask"].sum().item()
-
-            # -------------------------
-            # FORWARD PASS
-            # -------------------------
-
-            vram_tracker.resetVRamMemoryStat()
-
-            with torch.autocast(
-                    device_type="cuda",
-                    dtype=torch.float16
-            ):
-
-                outputs = model(**batch)
-                loss = outputs.loss
-
-            forward_loss = loss.detach().item()
-
-            vram_tracker.recordPeakVRam(
-                f"step{global_step + 1}_forward"
+            history["training_losses"].append(
+                entry["loss"]
             )
 
-            # -------------------------
-            # BACKWARD PASS
-            # -------------------------
+        if "eval_loss" in entry:
 
-            vram_tracker.resetVRamMemoryStat()
-
-            scaled_loss = loss / group_size
-            scaled_loss.backward()
-
-            vram_tracker.recordPeakVRam(
-                f"step{global_step + 1}_backward"
+            history["validation_steps"].append(
+                entry["step"]
             )
 
-            accumulated_loss += forward_loss
-            accumulated_batches += 1
-
-            del outputs, loss, scaled_loss
-
-            # -------------------------
-            # OPTIMIZER STEP
-            # -------------------------
-
-            should_update = (
-                    (batch_idx + 1) % G == 0
-                    or batch_idx + 1 == len(train_loader)
+            history["validation_losses"].append(
+                entry["eval_loss"]
             )
 
-            if should_update:
+    # --------------------------------------------------
+    # PERFORMANCE METRICS
+    # --------------------------------------------------
 
-                torch.nn.utils.clip_grad_norm_(
-                    trainable_params,
-                    max_norm=1.0
-                )
+    metrics = train_result.metrics
 
-                vram_tracker.resetVRamMemoryStat()
+    throughput = metrics.get(
+        "train_tokens_per_second",
+        0.0
+    )
 
-                optimizer.step()
-                scheduler.step()
+    global_step = trainer.state.global_step
 
-                vram_tracker.recordPeakVRam(
-                    f"step{global_step + 1}_optimizer"
-                )
-
-                optimizer.zero_grad(set_to_none=True)
-
-                global_step += 1
-
-                # -------------------------
-                # LOGGING
-                # -------------------------
-
-                if global_step % logging_steps == 0:
-
-                    avg_loss = (
-                            accumulated_loss /
-                            accumulated_batches
-                    )
-
-                    history["training_steps"].append(
-                        global_step
-                    )
-
-                    history["training_losses"].append(
-                        avg_loss
-                    )
-
-                    print(
-                        f"Epoch {epoch + 1} | "
-                        f"Step {global_step}/{total_steps} | "
-                        f"Training Loss: {avg_loss:.4f}"
-                    )
-
-                    accumulated_loss = 0.0
-                    accumulated_batches = 0
-
-                # -------------------------
-                # VALIDATION
-                # -------------------------
-
-                if global_step % eval_steps == 0:
-
-                    batch_idx_val = 0
-
-                    model.eval()
-
-                    validation_loss = 0.0
-                    validation_batches = 0
-
-                    with torch.no_grad():
-
-                        for eval_batch in eval_loader:
-
-                            batch_idx_val += 1
-
-                            print(
-                                f"Validating... Epoch {epoch + 1}/{epochs} | "
-                                f"Batch {batch_idx_val}/{len(eval_loader)}",
-                                flush=True
-                            )
-
-                            eval_batch = {
-                                key: value.to(device)
-                                for key, value in eval_batch.items()
-                            }
-
-                            with torch.autocast(
-                                    device_type="cuda",
-                                    dtype=torch.float16
-                            ):
-
-                                outputs = model(**eval_batch)
-
-                            validation_loss += (
-                                outputs.loss.item()
-                            )
-
-                            validation_batches += 1
-
-                            del outputs
-
-                    avg_validation_loss = (
-                            validation_loss /
-                            validation_batches
-                    )
-
-                    history["validation_steps"].append(
-                        global_step
-                    )
-
-                    history["validation_losses"].append(
-                        avg_validation_loss
-                    )
-
-                    print(
-                        f"Validation Loss: "
-                        f"{avg_validation_loss:.4f}"
-                    )
-
-                    model.train()
-
-    if accumulated_batches > 0:
-
-        avg_loss = accumulated_loss / accumulated_batches
-
-        history["training_steps"].append(global_step)
-        history["training_losses"].append(avg_loss)
-
-        print(
-            f"Final Training Loss | "
-            f"Step {global_step} | Loss: {avg_loss:.4f}"
-        )
-
-    runtime = time.perf_counter() - start_time
-
-    throughput = total_tokens / runtime
+    print("\nTraining Complete")
+    print("-------------------------")
+    print(f"Optimizer Steps: {global_step}")
+    print(f"Runtime: {runtime:.2f} seconds")
+    print(f"Tokens/sec: {throughput:.2f}")
+    print(f"Final Validation Loss: {final_eval['eval_loss']:.4f}")
 
     return {
         "history": history,
         "global_step": global_step,
         "runtime": runtime,
-        "tokens_per_second": throughput
+        "tokens_per_second": throughput,
+        "final_eval": final_eval,
+        "trainer": trainer
     }
 
 def benchmark(model, tokenizer, prompt, runs=20):
@@ -370,7 +270,7 @@ def run_training_experiment(rank, alpha, output_directory):
     )
 
     # 4 VRAM profiling
-    vramTracker.recordPeakVRam("Base Loading")
+    # vramTracker.recordPeakVRam("Base Loading")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -387,7 +287,7 @@ def run_training_experiment(rank, alpha, output_directory):
 
 
     # 4 VRAM profiling
-    vramTracker.recordPeakVRam("Tokenizer Loading")
+    # vramTracker.recordPeakVRam("Tokenizer Loading")
 
     # 2 Target Subspace Adaptation
     lora_config = LoraConfig(
@@ -479,6 +379,7 @@ def run_training_experiment(rank, alpha, output_directory):
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         vram_tracker=vramTracker,
+        output_directory=output_directory,
         epochs=1,
         logging_steps=100,
         eval_steps=100
@@ -490,10 +391,10 @@ def run_training_experiment(rank, alpha, output_directory):
     print("Tokens/sec:", results["tokens_per_second"])
     print("Steps:", results["global_step"])
 
-    print("VRAM:", vramTracker.vram_usage)
+    # print("VRAM:", vramTracker.vram_usage)
 
     # 4 VRAM profiling
-    vramTracker.recordPeakVRam("Adapter Injection")
+    # vramTracker.recordPeakVRam("Adapter Injection")
 
     # 5 Adapter Merging & Zero-Overhead Inference
 
@@ -542,7 +443,7 @@ def run_training_experiment(rank, alpha, output_directory):
 
     print(f"Latency improvement: {improvement:.2f}%")
 
-    print(vramTracker.vram_usage)
+    # print(vramTracker.vram_usage)
 
     plt.figure(figsize=(10, 6))
 
@@ -571,18 +472,22 @@ def run_training_experiment(rank, alpha, output_directory):
     plt.savefig(f"{output_directory}/loss_curve.png")
     plt.show()
 
-    vram_df = pd.DataFrame([
-        {
-            "phase": label,
-            "peak_vram_gb": value
-        }
-        for label, value in vramTracker.vram_usage.items()
-    ])
+    # vram_df = pd.DataFrame([
+    #     {
+    #         "phase": label,
+    #         "peak_vram_gb": value
+    #     }
+    #     for label, value in vramTracker.vram_usage.items()
+    # ])
+    #
+    # vram_df.to_csv(
+    #     f"{output_directory}/vram_usage.csv",
+    #     index=False
+    # )
 
-    vram_df.to_csv(
-        f"{output_directory}/vram_usage.csv",
-        index=False
-    )
+    # 4 VRAM profiling
+    maxVramUsage = vramTracker.recordPeakVRam("Total Max VRAM Usage")
+    print(f"Max VRAM Usage: {maxVramUsage:.2f} GB")
 
     del model, merged_model, tokenizer, dataset, train_dataset, eval_dataset, vramTracker, tokenized_dataset, packed_dataset
     torch.cuda.empty_cache()
