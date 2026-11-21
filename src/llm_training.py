@@ -486,15 +486,14 @@ def run_training_experiment(rank, alpha, output_directory):
     vram_df = pd.DataFrame([
         {
             "phase": label,
-            "peak_vram_gb": value
+            **metrics
         }
-        for label, value in vramTracker.vram_usage.items()
+        for label, metrics in vramTracker.vram_usage.items()
     ])
 
-    vram_df.to_csv(
-        f"{output_directory}/vram_usage.csv",
-        index=False
-    )
+    csv_path = f"{output_directory}/vram_usage.csv"
+
+    vram_df.to_csv(csv_path, index=False)
 
     # 4 VRAM profiling
     maxVramUsage = vramTracker.recordPeakVRam("Total Max VRAM Usage")

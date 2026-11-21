@@ -16,12 +16,30 @@ class VRamTracker:
 
         torch.cuda.synchronize()
 
-        peak_vram_gb = torch.cuda.max_memory_allocated() / (1024**3)
+        tempMetrics = {}
 
-        self.vram_usage[label] = max(
-            self.vram_usage.get(label, 0.0),
-            peak_vram_gb
-        )
+        peak_vram_gb = torch.cuda.max_memory_allocated() / (1024**3)
+        allocated_vram = torch.cuda.memory_allocated() / (1024 ** 3)
+        reserved_vram = torch.cuda.memory_reserved() / (1024 ** 3)
+
+        tempMetrics["peak_vram_gb"] = peak_vram_gb
+        tempMetrics["allocated_vram"] = allocated_vram
+        tempMetrics["reserved_vram"] = reserved_vram
+
+        if label not in self.vram_usage:
+            self.vram_usage[label] = {
+                "peak_vram_gb": 0.0,
+                "allocated_vram": 0.0,
+                "reserved_vram": 0.0
+            }
+
+        for key, value in tempMetrics.items():
+            self.vram_usage[label][key] = max(
+                self.vram_usage[label][key],
+                value
+            )
+
+        self.vram_usage[label] = tempMetrics
 
         self.resetVRamMemoryStat()
 
