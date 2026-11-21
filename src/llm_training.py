@@ -45,7 +45,6 @@ def train_model(
         train_dataset,
         eval_dataset,
         vram_tracker,
-        output_directory,
         epochs=1,
         logging_steps=50,
         eval_steps=50
@@ -68,8 +67,6 @@ def train_model(
     # --------------------------------------------------
 
     training_args = TrainingArguments(
-
-        output_dir=f".{output_directory}/qlora_checkpoints",
 
         # Training configuration
         num_train_epochs=epochs,
@@ -270,7 +267,7 @@ def run_training_experiment(rank, alpha, output_directory):
     )
 
     # 4 VRAM profiling
-    # vramTracker.recordPeakVRam("Base Loading")
+    vramTracker.recordPeakVRam("Base Loading")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -287,7 +284,7 @@ def run_training_experiment(rank, alpha, output_directory):
 
 
     # 4 VRAM profiling
-    # vramTracker.recordPeakVRam("Tokenizer Loading")
+    vramTracker.recordPeakVRam("Tokenizer Loading")
 
     # 2 Target Subspace Adaptation
     lora_config = LoraConfig(
@@ -300,6 +297,9 @@ def run_training_experiment(rank, alpha, output_directory):
     )
 
     model = get_peft_model(model, lora_config)
+
+    # 4 VRAM profiling
+    vramTracker.recordPeakVRam("Adapter Injection")
 
     model.print_trainable_parameters()
 
@@ -379,7 +379,6 @@ def run_training_experiment(rank, alpha, output_directory):
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         vram_tracker=vramTracker,
-        output_directory=output_directory,
         epochs=1,
         logging_steps=100,
         eval_steps=100
@@ -394,7 +393,7 @@ def run_training_experiment(rank, alpha, output_directory):
     # print("VRAM:", vramTracker.vram_usage)
 
     # 4 VRAM profiling
-    # vramTracker.recordPeakVRam("Adapter Injection")
+    vramTracker.recordPeakVRam("Adapter Injection")
 
     # 5 Adapter Merging & Zero-Overhead Inference
 
@@ -472,18 +471,18 @@ def run_training_experiment(rank, alpha, output_directory):
     plt.savefig(f"{output_directory}/loss_curve.png")
     plt.show()
 
-    # vram_df = pd.DataFrame([
-    #     {
-    #         "phase": label,
-    #         "peak_vram_gb": value
-    #     }
-    #     for label, value in vramTracker.vram_usage.items()
-    # ])
-    #
-    # vram_df.to_csv(
-    #     f"{output_directory}/vram_usage.csv",
-    #     index=False
-    # )
+    vram_df = pd.DataFrame([
+        {
+            "phase": label,
+            "peak_vram_gb": value
+        }
+        for label, value in vramTracker.vram_usage.items()
+    ])
+
+    vram_df.to_csv(
+        f"{output_directory}/vram_usage.csv",
+        index=False
+    )
 
     # 4 VRAM profiling
     maxVramUsage = vramTracker.recordPeakVRam("Total Max VRAM Usage")
