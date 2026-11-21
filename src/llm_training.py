@@ -102,7 +102,7 @@ def train_model(
         dataloader_pin_memory=True,
 
         # Metrics
-        include_tokens_per_second=True,
+        # include_tokens_per_second=True,
 
         # Miscellaneous
         report_to="none",
