@@ -78,7 +78,7 @@ def train_model(
         optim=optimizer,
         learning_rate=ni,
         lr_scheduler_type="linear",
-        warmup_ratio=0.03,
+        # warmup_ratio=0.03,
         weight_decay=0.0,
         max_grad_norm=1.0,
 
