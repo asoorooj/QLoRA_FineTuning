@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import time
 
-from vram_tracker import VRamTracker
+from vram_tracker import VRamTracker, VRAMTrackingTrainer
 
 # Hyper Parameters
 model_name = "Qwen/Qwen2.5-3B-Instruct"
@@ -123,7 +123,7 @@ def train_model(
     # TRAINER
     # --------------------------------------------------
 
-    trainer = Trainer(
+    trainer = VRAMTrackingTrainer(
 
         model=model,
 
@@ -134,6 +134,8 @@ def train_model(
         eval_dataset=eval_dataset,
 
         data_collator=default_data_collator,
+
+        vram_tracker=vram_tracker
 
         # callbacks=callbacks,
 
@@ -239,6 +241,9 @@ def benchmark(model, tokenizer, prompt, runs=20):
 
     return (elapsed / runs) * 1000
 
+
+
+
 def run_training_experiment(rank, alpha, output_directory):
 
     vramTracker = VRamTracker()
@@ -268,7 +273,7 @@ def run_training_experiment(rank, alpha, output_directory):
     )
 
     # 4 VRAM profiling
-    vramTracker.recordPeakVRam("Base Loading")
+    vramTracker.recordPeakVRam("Base Loading Base Qwen Model")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -393,7 +398,7 @@ def run_training_experiment(rank, alpha, output_directory):
     # print("VRAM:", vramTracker.vram_usage)
 
     # 4 VRAM profiling
-    vramTracker.recordPeakVRam("Adapter Injection")
+    vramTracker.recordPeakVRam("Model Training")
 
     # 5 Adapter Merging & Zero-Overhead Inference
 
@@ -405,6 +410,9 @@ def run_training_experiment(rank, alpha, output_directory):
         benchmark_prompt,
         runs=10
     )
+
+    # 4 VRAM profiling
+    vramTracker.recordPeakVRam("Benchmark Latency Before Merging")
 
     print(f"Before merging: {before_latency:.4f} ms/token")
 
@@ -421,6 +429,9 @@ def run_training_experiment(rank, alpha, output_directory):
         safe_merge=True
     )
 
+    # 4 VRAM profiling
+    vramTracker.recordPeakVRam("Merging Base Qwen Model and QLoRA Weights")
+
     merged_model.eval()
 
     merged_directory = f"{output_directory}/merged_model"
@@ -434,6 +445,9 @@ def run_training_experiment(rank, alpha, output_directory):
         benchmark_prompt,
         runs=10
     )
+
+    # 4 VRAM profiling
+    vramTracker.recordPeakVRam("Benchmark Latency After Merging")
 
     print(f"After merging: {after_latency:.4f} ms/token")
     improvement = (
