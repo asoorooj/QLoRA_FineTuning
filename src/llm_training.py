@@ -26,6 +26,7 @@ import pandas as pd
 import time
 
 from vram_tracker import VRamTracker, VRAMTrackingTrainer
+from benchmark import benchmark_token_prediction
 
 # Hyper Parameters
 model_name = "Qwen/Qwen2.5-3B-Instruct"
@@ -219,31 +220,6 @@ def train_model(
         "trainer": trainer
     }
 
-def benchmark(model, tokenizer, prompt, runs=20):
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-
-    # Warmup
-    for _ in range(3):
-        model.generate(**inputs, max_new_tokens=1)
-
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-
-    start = time.perf_counter()
-
-    for _ in range(runs):
-        model.generate(**inputs, max_new_tokens=1)
-
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-
-    elapsed = time.perf_counter() - start
-
-    return (elapsed / runs) * 1000
-
-
-
-
 def run_training_experiment(rank, alpha, output_directory):
 
     vramTracker = VRamTracker()
@@ -402,12 +378,7 @@ def run_training_experiment(rank, alpha, output_directory):
     # 5 Adapter Merging & Zero-Overhead Inference
     model.eval()
 
-    before_latency = benchmark(
-        model,
-        tokenizer,
-        benchmark_prompt,
-        runs=10
-    )
+    before_latency = benchmark_token_prediction(model, tokenizer, benchmark_prompt, runs=10)
 
     # 4 VRAM profiling
     vramTracker.recordPeakVRam("Benchmark Latency Before Merging")
@@ -437,12 +408,7 @@ def run_training_experiment(rank, alpha, output_directory):
     merged_model.save_pretrained(merged_directory)
     tokenizer.save_pretrained(merged_directory)
 
-    after_latency = benchmark(
-        merged_model,
-        tokenizer,
-        benchmark_prompt,
-        runs=10
-    )
+    after_latency = benchmark_token_prediction(merged_model, tokenizer, benchmark_prompt, runs=10)
 
     # 4 VRAM profiling
     vramTracker.recordPeakVRam("Benchmark Latency After Merging")
